@@ -1,0 +1,31 @@
+# 1. Bỏ qua các thư mục Dataset khổng lồ
+soccernet_data/
+soccernet_yolo/
+
+# 2. Bỏ qua thư mục Output của YOLO (rất nhiều ảnh test và log)
+runs/
+# (Tùy chọn) Nếu bạn muốn đưa file trọng số tốt nhất lên GitHub để demo, hãy bỏ dấu # ở dòng dưới:
+# !runs/detect/train-4/weights/best.pt 
+
+# 3. Bỏ qua tất cả các file Video cực nặng
+*.mp4
+*.avi
+*.mkv
+
+# 4. Bỏ qua các file trọng số Pre-trained có sẵn
+*.pt
+!best.pt # Đề phòng bạn copy file best.pt ra thư mục ngoài cùng
+
+# 5. Bỏ qua các file ảnh test/debug lẻ tẻ
+*.jpg
+*.jpeg
+*.png
+
+# 6. Bỏ qua thư mục cấu hình của IDE
+.vscode/
+
+# 7. Bỏ qua môi trường ảo và bộ nhớ đệm Python (Luôn cần thiết)
+__pycache__/
+*.pyc
+env/
+venv/

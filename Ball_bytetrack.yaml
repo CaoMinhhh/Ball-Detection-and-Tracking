@@ -1,0 +1,9 @@
+
+tracker_type: bytetrack
+
+track_high_thresh: 0.05     # ngưỡng conf để 1 detection được coi là "chất lượng cao", dùng để match/tạo track
+track_low_thresh: 0.01      # ngưỡng thấp hơn, chỉ dùng để nối vào track đã có sẵn (giai đoạn 2 của ByteTrack)
+new_track_thresh: 0.05      # ngưỡng để KHỞI TẠO track mới -- đây là chỗ quan trọng nhất, hạ từ 0.6 xuống
+track_buffer: 60            # số frame giữ track "sống" dù bị mất detection tạm thời (bóng bị che khuất/motion blur)
+match_thresh: 0.95           # ngưỡng IoU để match detection với track đang có
+fuse_score: False           # tắt việc fuse conf vào IoU score, tránh làm giảm thêm độ ưu tiên của detection conf thấp

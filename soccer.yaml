@@ -1,0 +1,6 @@
+path: E:/SoccerNet/soccernet_yolo
+train: images/train
+val: images/train 
+
+nc: 1
+names: ['ball']
