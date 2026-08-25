@@ -1,0 +1,4 @@
+# Core requirements for YOLOv8 and tracking
+ultralytics>=8.0.0
+opencv-python>=4.6.0
+numpy>=1.21.0
