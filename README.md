@@ -34,9 +34,11 @@ Ensure you have a test video (e.g., clip_test.mp4) and your trained weights (bes
    ```bash
    python test.py
 _Press 'q' at any time to interrupt the processing_
+
 2. Run the Empirical Analysis Tool:
 If you want to debug track fragmentation or calibrate the field boundary (Y-coordinate):
-
+   ```bash
+   python mini_test.py
 
 ## Configuration Adjustments:
 Inside `test.py`, you can toggle features or adjust tracking heuristics:
