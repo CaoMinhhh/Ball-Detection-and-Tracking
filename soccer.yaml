@@ -1,6 +1,10 @@
-path: E:/SoccerNet/soccernet_yolo
-train: images/train
-val: images/train 
+# YOLOv8 Dataset Configuration for Soccer Ball Detection
+# Note: Ensure the dataset is extracted in the same directory as this file.
 
-nc: 1
-names: ['ball']
+path: ./soccernet_yolo  # Relative path to the dataset root
+train: images/train     # Path to training images
+val: images/train       # Path to validation images (Using train set for quick evaluation)
+
+# Classes
+nc: 1                   # Number of classes
+names: ['ball']         # Class labels
