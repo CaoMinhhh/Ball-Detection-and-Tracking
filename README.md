@@ -23,7 +23,7 @@ To solve this, our pipeline implements a **Hybrid Tracking Architecture**:
 
 1. Clone this repository:
    ```bash
-   git clone <your-github-repo-url>
+   git clone [<your-github-repo-url>](https://github.com/CaoMinhhh/Ball-Detection-and-Tracking.git)
    cd <your-repo-folder>
 2. Install the required dependencies:
    ```bash
