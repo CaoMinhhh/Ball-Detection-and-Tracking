@@ -1,9 +1,12 @@
+# Custom ByteTrack Configuration for Small Fast-Moving Object (Ball) Tracking
+# Note: Default ByteTrack is optimized for large objects (humans/cars). 
+# These thresholds have been aggressively lowered to track small, blurred objects.
 
 tracker_type: bytetrack
 
-track_high_thresh: 0.05     # ngưỡng conf để 1 detection được coi là "chất lượng cao", dùng để match/tạo track
-track_low_thresh: 0.01      # ngưỡng thấp hơn, chỉ dùng để nối vào track đã có sẵn (giai đoạn 2 của ByteTrack)
-new_track_thresh: 0.05      # ngưỡng để KHỞI TẠO track mới -- đây là chỗ quan trọng nhất, hạ từ 0.6 xuống
-track_buffer: 60            # số frame giữ track "sống" dù bị mất detection tạm thời (bóng bị che khuất/motion blur)
-match_thresh: 0.95           # ngưỡng IoU để match detection với track đang có
-fuse_score: False           # tắt việc fuse conf vào IoU score, tránh làm giảm thêm độ ưu tiên của detection conf thấp
+track_high_thresh: 0.05    # Minimum conf for a detection to be considered "high quality" (match/init track)
+track_low_thresh: 0.01     # Lower conf threshold used only for secondary matching (ByteTrack Stage 2)
+new_track_thresh: 0.05     # NEW TRACK INIT THRESHOLD: Crucial adjustment (lowered from default 0.6 to capture faint balls)
+track_buffer: 60           # Lifespan (in frames) to keep a lost track alive (handles severe occlusions / motion blur)
+match_thresh: 0.95         # IoU distance matching threshold
+fuse_score: False          # Disabled fusing conf into IoU score to avoid penalizing low-conf true positives
