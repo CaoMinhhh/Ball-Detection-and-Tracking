@@ -1,217 +1,219 @@
 """
-Ball tracking + trajectory line + player detection/ID cho video bóng đá.
-(BẢN CHỐT -- xem tóm tắt các quyết định thiết kế ở cuối file để đưa vào báo cáo)
+=============================================================================
+CUSTOM BALL & PLAYER TRACKING PIPELINE (FINAL SUBMISSION)
+=============================================================================
+Prerequisites:
+    pip install ultralytics opencv-python
 
-Yêu cầu:
-    pip install ultralytics opencv-python --break-system-packages   (nếu chưa có)
+Usage:
+    1. Ensure YOLOv8 weights (BALL_MODEL_PATH and PERSON_MODEL_PATH) are correct.
+    2. Set INPUT_VIDEO to your target clip.
+    3. Run: `python test.py` (Press 'q' to quit early).
 
-Cách dùng:
-    1. Sửa BALL_MODEL_PATH nếu đường dẫn best.pt khác.
-    2. Sửa INPUT_VIDEO trỏ tới video/clip muốn test (vd: clip_test.mp4).
-    3. Chạy: python ball_and_player_tracking.py
-    4. Video kết quả được lưu ra OUTPUT_VIDEO, đồng thời hiện preview real-time.
-       Nhấn 'q' để dừng sớm.
+METHODOLOGY & DESIGN DECISIONS (Heuristic Tracking Algorithm):
+    1. Single-Object Tracking (SOT) Regression: Replaced ByteTrack for the ball. 
+       ByteTrack relies on frame-to-frame IoU, which fails for small, fast-moving 
+       objects (IoU drops to 0, causing severe ID fragmentation - e.g., 43 IDs 
+       in 200 frames).
+    2. Multi-Object Tracking (MOT) Retention: Kept ByteTrack for players, as 
+       they are large enough to maintain stable IoU and require ID differentiation.
+    3. Shape & Spatial Prior Filtering: Candidates are filtered by bounding box 
+       area, aspect ratio, and field coordinates to eliminate geometric false 
+       positives (e.g., shoes, corner flags, audience).
+    4. Distance-Confidence Hybrid Scoring: The candidate selection metric penalizes 
+       distance while rewarding YOLO confidence. This prevents the tracker from 
+       latching onto weak nearby noise while ignoring high-confidence actual balls 
+       slightly further away.
+    5. Anti-Drift Mechanism (Stuck Recovery): If track confidence remains below 
+       a threshold for consecutive frames, the tracker actively drops the trajectory 
+       to prevent locking onto static background noise.
+
+KNOWN LIMITATIONS:
+    - Trajectory gaps occur during severe motion blur or complete occlusion.
+    - Spatial boundary (BALL_FIELD_TOP_Y) assumes a relatively static broadcast 
+      camera angle; heavy pan/zoom may require dynamic thresholding.
+=============================================================================
 """
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# ----------------------- CONFIG -----------------------
-BALL_MODEL_PATH = r"E:\SoccerNet\runs\detect\train-4\weights\best.pt"
-PERSON_MODEL_PATH = "yolov8n.pt"          # pretrained COCO, có sẵn class "person"
+# ----------------------- 1. CONFIGURATION -----------------------
+# Paths (Use relative paths for portability)
+BALL_MODEL_PATH = "runs/detect/train/weights/best.pt"
+PERSON_MODEL_PATH = "yolov8n.pt"           # Pretrained COCO model
 INPUT_VIDEO = "clip_test.mp4"
 OUTPUT_VIDEO = "tracked_output.mp4"
 
-BALL_CONF = 0.05                          # thấp, để không bỏ sót detection yếu của bóng nhỏ/nhanh
-BALL_INFER_IMGSZ = 1280                   # cao hơn imgsz lúc train (960), giúp bóng giữ đủ pixel khi infer
-BALL_MAX_JUMP_DIST = 100                  # px -- khoảng cách tối đa coi là "liên tục" giữa 2 frame
-BALL_FALLBACK_MIN_CONF = 0.3              # chỉ chấp nhận nối line khi nhảy xa nếu conf đủ cao
-BALL_MIN_AREA = 30                        # px^2 -- loại box quá nhỏ (nhiễu vụn vặt)
-BALL_MAX_AREA = 1600                      # px^2 -- loại box quá to (chân/giày cầu thủ)
-BALL_MIN_ASPECT = 0.5                     # w/h tối thiểu -- bóng gần vuông, giày/cờ thường dẹt/dài hơn
-BALL_MAX_ASPECT = 2.0                     # w/h tối đa
-BALL_FIELD_TOP_Y = 330                    # px -- ranh giới trên của sân, loại detection ở khán đài
-BALL_DIST_PENALTY_WEIGHT = 0.6            # trọng số phạt theo khoảng cách so với conf khi chọn box
-BALL_STUCK_CONF_THRESH = 0.15             # conf dưới ngưỡng này liên tục -> nghi dính nhiễu tĩnh
-BALL_STUCK_FRAME_LIMIT = 8                # số frame liên tiếp trước khi "buông" vị trí cũ
+# Feature Toggles
+ENABLE_PLAYER_TRACKING = False             # Set to True to enable ByteTrack for players
 
+# Ball Detection & Tracking Thresholds
+BALL_CONF = 0.05                           # Extremely low conf to catch motion blur
+BALL_INFER_IMGSZ = 1280                    # High resolution inference to preserve small pixels
+BALL_MAX_JUMP_DIST = 100                   # px: Max allowed Euclidean distance between frames
+BALL_FALLBACK_MIN_CONF = 0.3               # Min conf to accept a long-distance jump
+BALL_MIN_AREA = 30                         # px^2: Min bounding box area
+BALL_MAX_AREA = 1600                       # px^2: Max bounding box area (filters out shoes)
+BALL_MIN_ASPECT = 0.5                      # Min w/h ratio (ball is nearly square)
+BALL_MAX_ASPECT = 2.0                      # Max w/h ratio
+BALL_FIELD_TOP_Y = 330                     # px: Upper boundary to filter audience detections
+BALL_DIST_PENALTY_WEIGHT = 0.6             # Weight for distance penalty in selection scoring
+BALL_STUCK_CONF_THRESH = 0.15              # Threshold to detect static noise lock
+BALL_STUCK_FRAME_LIMIT = 8                 # Consecutive low-conf frames before dropping track
+
+# Player Tracking Configurations
 PERSON_CONF = 0.35
-TRAIL_LEN = 30                            # số điểm giữ lại để vẽ line
-PERSON_DETECT_EVERY_N_FRAMES = 2          # detect người mỗi N frame để đỡ tốn compute
-# --------------------------------------------------------
+PERSON_DETECT_EVERY_N_FRAMES = 2           # Stride to reduce compute load
 
-ball_model = YOLO(BALL_MODEL_PATH)
-person_model = YOLO(PERSON_MODEL_PATH)
+# Visualization
+TRAIL_LEN = 30                             # Number of history points for the fade trail
+# ----------------------------------------------------------------
 
-ball_trail = []            # list các (x, y) hoặc None (break marker), không phụ thuộc track ID
-ball_last_pos = None
-ball_low_conf_streak = 0
-last_person_boxes = []
+def main():
+    print("[*] Loading YOLO models...")
+    ball_model = YOLO(BALL_MODEL_PATH)
+    if ENABLE_PLAYER_TRACKING:
+        person_model = YOLO(PERSON_MODEL_PATH)
 
+    ball_trail = []             # Stores (x, y) tuples or None (break markers)
+    ball_last_pos = None
+    ball_low_conf_streak = 0
+    last_person_boxes = []
 
-def trim_trail():
-    """Giữ ball_trail không vượt quá TRAIL_LEN phần tử, gọi sau MỌI lần append."""
-    while len(ball_trail) > TRAIL_LEN:
-        ball_trail.pop(0)
+    def trim_trail():
+        """Maintains the trail buffer size."""
+        while len(ball_trail) > TRAIL_LEN:
+            ball_trail.pop(0)
 
+    print(f"[*] Opening video: {INPUT_VIDEO}")
+    cap = cv2.VideoCapture(INPUT_VIDEO)
+    if not cap.isOpened():
+        raise FileNotFoundError(f"[!] Error: Cannot open video '{INPUT_VIDEO}'")
 
-cap = cv2.VideoCapture(INPUT_VIDEO)
-if not cap.isOpened():
-    raise FileNotFoundError(f"Không mở được video: {INPUT_VIDEO}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-fps = cap.get(cv2.CAP_PROP_FPS) or 25
-w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (w, h))
 
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-writer = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (w, h))
+    frame_idx = 0
+    print("[>] Processing frames (Press 'q' to stop)...")
 
-frame_idx = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+        annotated = frame.copy()
 
-    annotated = frame.copy()
+        # ================= A. BALL PROCESSING =================
+        ball_results = ball_model.predict(frame, conf=BALL_CONF, imgsz=BALL_INFER_IMGSZ, verbose=False)
+        boxes = ball_results[0].boxes
 
-    # ================= BALL: detect + trajectory =================
-    ball_results = ball_model.predict(frame, conf=BALL_CONF, imgsz=BALL_INFER_IMGSZ, verbose=False)
-    boxes = ball_results[0].boxes
+        if len(boxes) > 0:
+            xywh = boxes.xywh.cpu().numpy()
+            xyxy = boxes.xyxy.cpu().numpy()
+            confs = boxes.conf.cpu().numpy()
 
-    if len(boxes) > 0:
-        xywh = boxes.xywh.cpu().numpy()
-        xyxy = boxes.xyxy.cpu().numpy()
-        confs = boxes.conf.cpu().numpy()
-
-        # lọc theo kích thước + tỉ lệ + vị trí (loại giày/cờ/khán đài)
-        bw, bh = xywh[:, 2], xywh[:, 3]
-        area = bw * bh
-        aspect = bw / np.maximum(bh, 1e-6)
-        shape_mask = (
-            (area >= BALL_MIN_AREA) & (area <= BALL_MAX_AREA) &
-            (aspect >= BALL_MIN_ASPECT) & (aspect <= BALL_MAX_ASPECT) &
-            (xywh[:, 1] >= BALL_FIELD_TOP_Y)
-        )
-        xywh, xyxy, confs = xywh[shape_mask], xyxy[shape_mask], confs[shape_mask]
-    else:
-        xywh, xyxy, confs = np.empty((0, 4)), np.empty((0, 4)), np.empty((0,))
-
-    if len(xywh) > 0:
-        # chọn box hiển thị: kết hợp khoảng cách + conf (tránh dính nhiễu gần, bỏ sót bóng thật ở xa hơn 1 chút)
-        if ball_last_pos is not None:
-            dists = np.linalg.norm(xywh[:, :2] - np.array(ball_last_pos), axis=1)
-            scores = confs - BALL_DIST_PENALTY_WEIGHT * (dists / BALL_MAX_JUMP_DIST)
+            # Geometric & Spatial Filtering
+            bw, bh = xywh[:, 2], xywh[:, 3]
+            area = bw * bh
+            aspect = bw / np.maximum(bh, 1e-6)
+            shape_mask = (
+                (area >= BALL_MIN_AREA) & (area <= BALL_MAX_AREA) &
+                (aspect >= BALL_MIN_ASPECT) & (aspect <= BALL_MAX_ASPECT) &
+                (xywh[:, 1] >= BALL_FIELD_TOP_Y)
+            )
+            xywh, xyxy, confs = xywh[shape_mask], xyxy[shape_mask], confs[shape_mask]
         else:
-            scores = confs
-        display_idx = int(np.argmax(scores))
-        cx, cy = xywh[display_idx][0], xywh[display_idx][1]
-        display_conf = confs[display_idx]
+            xywh, xyxy, confs = np.empty((0, 4)), np.empty((0, 4)), np.empty((0,))
 
-        # line chỉ nối nếu đủ tin cậy
-        should_connect = False
-        if ball_last_pos is not None:
-            dist_to_last = np.linalg.norm(np.array([cx, cy]) - np.array(ball_last_pos))
-            should_connect = (dist_to_last <= BALL_MAX_JUMP_DIST) or (display_conf >= BALL_FALLBACK_MIN_CONF)
+        if len(xywh) > 0:
+            # Candidate Selection: Score = Confidence - Distance_Penalty
+            if ball_last_pos is not None:
+                dists = np.linalg.norm(xywh[:, :2] - np.array(ball_last_pos), axis=1)
+                scores = confs - BALL_DIST_PENALTY_WEIGHT * (dists / BALL_MAX_JUMP_DIST)
+            else:
+                scores = confs
+                
+            display_idx = int(np.argmax(scores))
+            cx, cy = xywh[display_idx][0], xywh[display_idx][1]
+            display_conf = confs[display_idx]
 
-        # cơ chế "buông" khi dính nhiễu yếu kéo dài
-        ball_low_conf_streak = ball_low_conf_streak + 1 if display_conf < BALL_STUCK_CONF_THRESH else 0
+            # Continuity Decision
+            should_connect = False
+            if ball_last_pos is not None:
+                dist_to_last = np.linalg.norm(np.array([cx, cy]) - np.array(ball_last_pos))
+                should_connect = (dist_to_last <= BALL_MAX_JUMP_DIST) or (display_conf >= BALL_FALLBACK_MIN_CONF)
 
-        if ball_low_conf_streak >= BALL_STUCK_FRAME_LIMIT:
-            ball_last_pos = None
-            ball_low_conf_streak = 0
-            ball_trail.append(None)
-            trim_trail()
-            # bỏ qua hẳn frame này (không vẽ box, không cập nhật vị trí theo nhiễu vừa buông)
-        else:
-            if not should_connect and ball_last_pos is not None:
+            # Anti-Drift (Stuck Recovery) Mechanism
+            ball_low_conf_streak = ball_low_conf_streak + 1 if display_conf < BALL_STUCK_CONF_THRESH else 0
+
+            if ball_low_conf_streak >= BALL_STUCK_FRAME_LIMIT:
+                ball_last_pos = None
+                ball_low_conf_streak = 0
                 ball_trail.append(None)
                 trim_trail()
+                # Skip box drawing for this frame to break the drift lock
+            else:
+                if not should_connect and ball_last_pos is not None:
+                    ball_trail.append(None)
+                    trim_trail()
 
-            ball_last_pos = (cx, cy)
-            ball_trail.append((float(cx), float(cy)))
-            trim_trail()
+                ball_last_pos = (cx, cy)
+                ball_trail.append((float(cx), float(cy)))
+                trim_trail()
 
-            x1, y1, x2, y2 = xyxy[display_idx].astype(int)
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
-            cv2.putText(annotated, "Ball", (x1, max(0, y1 - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                # Draw Bounding Box
+                x1, y1, x2, y2 = xyxy[display_idx].astype(int)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                cv2.putText(annotated, f"Ball {display_conf:.2f}", (x1, max(0, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-        # vẽ vệt bóng mờ dần, bỏ qua đoạn nối nếu 1 trong 2 đầu là break marker
-        for i in range(1, len(ball_trail)):
-            p1, p2 = ball_trail[i - 1], ball_trail[i]
-            if p1 is None or p2 is None:
-                continue
-            alpha = i / len(ball_trail)
-            thickness = max(1, int(4 * alpha))
-            color = (0, int(255 * alpha), int(255 * alpha))
-            cv2.line(annotated, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), color, thickness)
-    # else: không có box hợp lệ -> giữ nguyên trail, không reset (bóng có thể tạm bị che khuất)
+            # Draw Motion Fade Trail
+            for i in range(1, len(ball_trail)):
+                p1, p2 = ball_trail[i - 1], ball_trail[i]
+                if p1 is None or p2 is None:
+                    continue
+                alpha = i / len(ball_trail)
+                thickness = max(1, int(4 * alpha))
+                color = (0, int(255 * alpha), int(255 * alpha))
+                cv2.line(annotated, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), color, thickness)
+        
+        # ================= B. PLAYER PROCESSING (Optional) =================
+        if ENABLE_PLAYER_TRACKING:
+            if frame_idx % PERSON_DETECT_EVERY_N_FRAMES == 0:
+                person_results = person_model.track(
+                    frame, persist=True, tracker='bytetrack.yaml', conf=PERSON_CONF, classes=[0], verbose=False
+                )
+                last_person_boxes = []
+                if person_results[0].boxes is not None and person_results[0].boxes.id is not None:
+                    p_boxes = person_results[0].boxes.xyxy.cpu().numpy()
+                    p_ids = person_results[0].boxes.id.int().cpu().tolist()
+                    last_person_boxes = list(zip(p_boxes, p_ids))
 
-    # ================= PERSON: detect + ID =================
-    # if frame_idx % PERSON_DETECT_EVERY_N_FRAMES == 0:
-    #     person_results = person_model.track(
-    #         frame, persist=True, tracker='bytetrack.yaml', conf=PERSON_CONF, classes=[0], verbose=False
-    #     )
-    #     last_person_boxes = []
-    #     if person_results[0].boxes.id is not None:
-    #         p_boxes = person_results[0].boxes.xyxy.cpu().numpy()
-    #         p_ids = person_results[0].boxes.id.int().cpu().tolist()
-    #         last_person_boxes = list(zip(p_boxes, p_ids))
+            for box, pid in last_person_boxes:
+                x1, y1, x2, y2 = box.astype(int)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                cv2.putText(annotated, f"ID:{pid}", (x1, max(0, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-    # for box, pid in last_person_boxes:
-    #     x1, y1, x2, y2 = box.astype(int)
-    #     cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 0), 2)
-    #     cv2.putText(annotated, f"ID:{pid}", (x1, max(0, y1 - 8)),
-    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+        # ================= C. OUTPUT & PREVIEW =================
+        writer.write(annotated)
+        cv2.imshow('Custom Heuristic Tracking Pipeline', annotated)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("\n[!] Processing interrupted by user.")
+            break
 
-    # ================= Ghi video + preview =================
-    writer.write(annotated)
-    cv2.imshow('Ball + Player Tracking', annotated)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        frame_idx += 1
 
-    frame_idx += 1
+    cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
+    print(f"\n[+] DONE! Tracked output saved successfully at: {OUTPUT_VIDEO}")
 
-cap.release()
-writer.release()
-cv2.destroyAllWindows()
-print(f"Xong. Video kết quả đã lưu tại: {OUTPUT_VIDEO}")
-
-
-"""
-TÓM TẮT QUYẾT ĐỊNH THIẾT KẾ (để đưa vào báo cáo, phần Methodology / Challenges):
-
-1. Bỏ ByteTrack cho bóng, dùng model.predict() thuần + tự viết continuity theo khoảng cách.
-   Lý do: ByteTrack dựa trên IoU giữa 2 frame để giữ track ID; với vật thể nhỏ + di chuyển
-   nhanh như bóng, IoU giữa 2 frame liên tiếp thường quá thấp -> 1 quả bóng bị tách thành
-   hàng chục track ID khác nhau (đã kiểm chứng bằng thực nghiệm: 43 ID trong 200 frame).
-
-2. Vẫn giữ ByteTrack cho người -- vì có nhiều đối tượng cùng lúc, cần ID để phân biệt,
-   và người có kích thước đủ lớn để IoU giữa 2 frame vẫn ổn định.
-
-3. Lọc box theo hình dạng (diện tích + tỉ lệ khung hình) trước khi xét continuity,
-   để loại các nhiễu không giống bóng về mặt hình học (giày, cờ góc...).
-
-4. Lọc theo vị trí (BALL_FIELD_TOP_Y): loại toàn bộ detection ở khán đài, dựa trên giả định
-   camera broadcast giữ góc quay tương đối cố định trong clip.
-
-5. Chọn box hiển thị bằng score kết hợp cả khoảng cách lẫn confidence (không chỉ 1 trong 2),
-   để tránh 2 lỗi đối lập: (a) chỉ ưu tiên khoảng cách -> dễ bị "dính" vào 1 nhiễu yếu ở gần
-   trong khi bỏ qua bóng thật conf cao hơn ở xa hơn 1 chút; (b) chỉ ưu tiên conf -> box có thể
-   nhảy sang vật thể khác có conf cao hơn ở vị trí bất kỳ trong frame.
-
-6. Tách riêng quyết định "vẽ box" và "nối line": box được vẽ bất cứ khi nào có detection
-   hợp lệ, nhưng line chỉ nối khi đủ tin cậy (continuity gần, hoặc conf cao khi nhảy xa) --
-   tránh việc "mất box" chỉ vì line không đủ điều kiện nối.
-
-7. Cơ chế "buông" (BALL_STUCK_*): nếu vị trí đang bám có conf thấp liên tục nhiều frame,
-   chủ động reset để tránh bị khóa cứng vào 1 điểm nhiễu tĩnh trong thời gian dài.
-
-HẠN CHẾ ĐÃ BIẾT (đưa vào phần Limitations):
-- Vẫn có tỷ lệ frame mất box đáng kể khi bóng bị che khuất hoàn toàn hoặc motion blur nặng.
-- BALL_FIELD_TOP_Y giả định camera không pan/zoom mạnh -- không tổng quát cho mọi loại video.
-- Các ngưỡng (conf, khoảng cách, diện tích...) được hiệu chỉnh thủ công dựa trên quan sát
-  thực nghiệm trên 1 clip cụ thể, có thể cần điều chỉnh lại với video/góc quay khác.
-"""
+if __name__ == '__main__':
+    main()
